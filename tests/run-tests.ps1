@@ -308,5 +308,189 @@ It 'rejects a manifest whose pinned LK source leaves the recorded commit' {
     }
 }
 
+function New-ReadyDestructiveFixture {
+    $manifest = Read-UnlockCompatibilityManifest -Path $manifestPath
+    $profile = @($manifest.profiles)[0]
+    return [pscustomobject]@{
+        Manifest = $manifest
+        Profile = $profile
+        Audit = [pscustomobject]@{
+            ReadyForDestructiveWorkflow = $true
+            ProfileId = [string]$profile.id
+            Snapshot = [pscustomobject]@{
+                model = [string]$profile.identity.model
+                device = [string]$profile.identity.device
+                displayId = [string]$profile.identity.displayId
+                otaVersion = [string]$profile.identity.otaVersion
+                kernel = [string]$profile.identity.kernel
+                slot = '_b'
+                batteryPercent = 80
+                flashLocked = '1'
+                verifiedBootState = 'green'
+            }
+        }
+        Assets = [pscustomobject]@{
+            KernelSuValid = $true
+            GhostLockValid = $true
+            LkValid = $true
+        }
+        Stage = [pscustomobject]@{
+            TargetSlot = '_a'
+            LkPartitionBytes = 16777216
+            LkStockPrefixSha256 = '0da00158fbed097d8ced1fb61bb2c3c5048fc3a9086996e65715e31ccbbbaede'
+            InitBootPartitionBytes = 8388608
+            InitBootStockSha256 = '745e8f8f9804d90d362286b9078b90850e0f5c0877ae641d71924729b77a6e28'
+            LkBackupSha256 = ('1' * 64)
+            InitBootBackupSha256 = ('2' * 64)
+            LocalBackupsPresent = $true
+        }
+    }
+}
+
+It 'blocks every destructive command unless the explicit switch and exact phrase are both present' {
+    $fixture = New-ReadyDestructiveFixture
+    $gate = Test-DestructivePrerequisites -Profile $fixture.Profile -Audit $fixture.Audit -Assets $fixture.Assets -Stage $fixture.Stage -RootAvailable $true
+    Assert-True (-not $gate.Allowed) 'destructive gate opened without explicit authorization'
+    Assert-Equal @(Get-DestructiveCommandPlan -Profile $fixture.Profile -Gate $gate).Count 0 'blocked gate emitted commands'
+
+    $wrongPhrase = Test-DestructivePrerequisites -Profile $fixture.Profile -Audit $fixture.Audit -Assets $fixture.Assets -Stage $fixture.Stage -RootAvailable $true -EnableDestructive -ConfirmationPhrase 'I UNDERSTAND'
+    Assert-True (-not $wrongPhrase.Allowed) 'partial confirmation phrase was accepted'
+}
+
+It 'blocks destructive work when temporary root or local partition backups are missing' {
+    $fixture = New-ReadyDestructiveFixture
+    $fixture.Stage.LocalBackupsPresent = $false
+    $gate = Test-DestructivePrerequisites -Profile $fixture.Profile -Audit $fixture.Audit -Assets $fixture.Assets -Stage $fixture.Stage -RootAvailable $false -EnableDestructive -ConfirmationPhrase $fixture.Profile.workflow.confirmationPhrase
+    Assert-True (-not $gate.Allowed) 'missing root/backups were accepted'
+    Assert-True (($gate.Blockers -join ' ') -match 'root') 'root blocker is missing'
+    Assert-True (($gate.Blockers -join ' ') -match 'backup') 'backup blocker is missing'
+    Assert-Equal @(Get-DestructiveCommandPlan -Profile $fixture.Profile -Gate $gate).Count 0 'blocked gate emitted commands'
+}
+
+It 'blocks active slot A and a low battery even if an old audit claimed readiness' {
+    $fixture = New-ReadyDestructiveFixture
+    $fixture.Audit.Snapshot.slot = '_a'
+    $fixture.Audit.Snapshot.batteryPercent = 59
+    $gate = Test-DestructivePrerequisites -Profile $fixture.Profile -Audit $fixture.Audit -Assets $fixture.Assets -Stage $fixture.Stage -RootAvailable $true -EnableDestructive -ConfirmationPhrase $fixture.Profile.workflow.confirmationPhrase
+    Assert-True (-not $gate.Allowed) 'drifted slot/battery were accepted'
+    Assert-True (($gate.Blockers -join ' ') -match 'slot') 'slot blocker is missing'
+    Assert-True (($gate.Blockers -join ' ') -match 'battery') 'battery blocker is missing'
+}
+
+It 'blocks a wrong LK size or either wrong stock hash before the write boundary' {
+    foreach ($mutation in @('lk-size', 'lk-hash', 'init-boot-hash')) {
+        $fixture = New-ReadyDestructiveFixture
+        if ($mutation -eq 'lk-size') { $fixture.Stage.LkPartitionBytes = 4096 }
+        if ($mutation -eq 'lk-hash') { $fixture.Stage.LkStockPrefixSha256 = ('a' * 64) }
+        if ($mutation -eq 'init-boot-hash') { $fixture.Stage.InitBootStockSha256 = ('b' * 64) }
+        $gate = Test-DestructivePrerequisites -Profile $fixture.Profile -Audit $fixture.Audit -Assets $fixture.Assets -Stage $fixture.Stage -RootAvailable $true -EnableDestructive -ConfirmationPhrase $fixture.Profile.workflow.confirmationPhrase
+        Assert-True (-not $gate.Allowed) ("unsafe stage mutation was accepted: {0}" -f $mutation)
+        Assert-Equal @(Get-DestructiveCommandPlan -Profile $fixture.Profile -Gate $gate).Count 0 ("unsafe stage emitted commands: {0}" -f $mutation)
+    }
+}
+
+It 'emits the fixed B-to-A command plan only after every gate passes' {
+    $fixture = New-ReadyDestructiveFixture
+    $gate = Test-DestructivePrerequisites -Profile $fixture.Profile -Audit $fixture.Audit -Assets $fixture.Assets -Stage $fixture.Stage -RootAvailable $true -EnableDestructive -ConfirmationPhrase $fixture.Profile.workflow.confirmationPhrase
+    Assert-True $gate.Allowed 'fully validated gate remained closed'
+    $plan = @(Get-DestructiveCommandPlan -Profile $fixture.Profile -Gate $gate)
+    Assert-Equal $plan.Count 4 'unexpected destructive command count'
+    Assert-Equal $plan[0].Id 'write-lk-a' 'LK write is not the first destructive step'
+    Assert-Equal $plan[1].Id 'set-active-a' 'slot switch is out of order'
+    Assert-Equal $plan[2].Id 'unlock-and-revalidate' 'unlock is out of order'
+    Assert-Equal $plan[3].Id 'flash-init-boot-a' 'persistent-root flash is out of order'
+}
+
+It 'rejects an interrupted LK write readback before slot switching' {
+    $fixture = New-ReadyDestructiveFixture
+    $readback = [pscustomobject]@{
+        BytesWritten = 4096
+        ModifiedSha256 = ('f' * 64)
+        BlockDeviceReadOnly = $true
+    }
+    $result = Test-LkWriteReadback -Profile $fixture.Profile -Readback $readback
+    Assert-True (-not $result.Valid) 'interrupted write was accepted'
+}
+
+It 'does not accept host-side fastboot OKAY without independent unlocked and secure readback' {
+    $locked = @{ unlocked = 'no'; secure = 'yes' }
+    $verified = @{ unlocked = 'yes'; secure = 'no' }
+    Assert-True (-not (Test-UnlockReadback -HostCommandSucceeded $true -Variables $locked)) 'host OKAY bypassed bootloader readback'
+    Assert-True (-not (Test-UnlockReadback -HostCommandSucceeded $false -Variables $verified)) 'failed host command was accepted'
+    Assert-True (Test-UnlockReadback -HostCommandSucceeded $true -Variables $verified) 'independently verified unlock was rejected'
+}
+
+It 'requires ordinary-reboot evidence for persistent KernelSU root' {
+    $fixture = New-ReadyDestructiveFixture
+    $post = [pscustomobject]@{
+        BootWasOrdinaryReboot = $true
+        Slot = '_a'
+        FlashLocked = '0'
+        VerifiedBootState = 'orange'
+        KsudVersion = '3.2.5'
+        IdOutput = 'uid=0(root) gid=0(root) groups=0(root)'
+    }
+    Assert-True (Test-PersistentRootReadback -Profile $fixture.Profile -Snapshot $post) 'verified persistent root was rejected'
+    $post.BootWasOrdinaryReboot = $false
+    Assert-True (-not (Test-PersistentRootReadback -Profile $fixture.Profile -Snapshot $post)) 'non-reboot evidence was accepted'
+}
+
+It 'rejects workflow state when the current profile or device fingerprint drifts' {
+    $fixture = New-ReadyDestructiveFixture
+    $state = New-UnlockWorkflowState -Serial 'TESTSERIAL0001' -Profile $fixture.Profile -Audit $fixture.Audit -Assets $fixture.Assets -Stage $fixture.Stage
+    Assert-True (Test-UnlockWorkflowResume -State $state -Serial 'TESTSERIAL0001' -Profile $fixture.Profile -Audit $fixture.Audit) 'matching state was rejected'
+    $fixture.Audit.Snapshot.slot = '_a'
+    Assert-True (-not (Test-UnlockWorkflowResume -State $state -Serial 'TESTSERIAL0001' -Profile $fixture.Profile -Audit $fixture.Audit)) 'drifted live slot was accepted'
+    Assert-True (-not (Test-UnlockWorkflowResume -State $state -Serial 'DIFFERENT' -Profile $fixture.Profile -Audit $fixture.Audit)) 'different device serial was accepted'
+    $fixture = New-ReadyDestructiveFixture
+    $state = New-UnlockWorkflowState -Serial 'TESTSERIAL0001' -Profile $fixture.Profile -Audit $fixture.Audit -Assets $fixture.Assets -Stage $fixture.Stage
+    $fixture.Audit.Snapshot.kernel = 'updated-kernel'
+    Assert-True (-not (Test-UnlockWorkflowResume -State $state -Serial 'TESTSERIAL0001' -Profile $fixture.Profile -Audit $fixture.Audit)) 'drifted kernel was accepted'
+}
+
+It 'round-trips workflow state atomically without leaving a partial file' {
+    $fixture = New-ReadyDestructiveFixture
+    $state = New-UnlockWorkflowState -Serial 'TESTSERIAL0001' -Profile $fixture.Profile -Audit $fixture.Audit -Assets $fixture.Assets -Stage $fixture.Stage
+    $tempDir = Join-Path ([IO.Path]::GetTempPath()) ('opd2506-state-{0}' -f [guid]::NewGuid().ToString('N'))
+    [void](New-Item -ItemType Directory -Path $tempDir)
+    try {
+        $path = Join-Path $tempDir 'workflow.json'
+        Write-UnlockWorkflowState -State $state -Path $path
+        $readBack = Read-UnlockWorkflowState -Path $path
+        Assert-Equal $readBack.ProfileId $fixture.Profile.id 'state profile mismatch'
+        Assert-Equal $readBack.Serial 'TESTSERIAL0001' 'state serial mismatch'
+        Assert-True (-not (Test-Path -LiteralPath ($path + '.partial'))) 'partial state file survived promotion'
+    }
+    finally {
+        if (Test-Path -LiteralPath $tempDir) { Remove-Item -LiteralPath $tempDir -Recurse -Force }
+    }
+}
+
+It 'keeps the stage verifier physically read-only' {
+    $path = Join-Path $repoRoot 'device\verify-stage.sh'
+    Assert-True (Test-Path -LiteralPath $path -PathType Leaf) 'stage verifier is missing'
+    $source = Get-Content -LiteralPath $path -Raw
+    Assert-True ($source -notmatch '(?m)\bsetrw\b|\bdd\s+[^\r\n]*\bof=|\bfastboot\b|\breboot\b') 'stage verifier contains a mutating token'
+    Assert-True ($source -match 'LK_PREFIX_SHA256') 'stage verifier does not pin the stock LK prefix'
+}
+
+It 'forces the LK write boundary back to read-only and verifies readback' {
+    $path = Join-Path $repoRoot 'device\write-lk.sh'
+    Assert-True (Test-Path -LiteralPath $path -PathType Leaf) 'LK write boundary is missing'
+    $source = Get-Content -LiteralPath $path -Raw
+    Assert-True ($source -match 'trap cleanup EXIT INT TERM HUP') 'write boundary has no cleanup trap'
+    Assert-True ($source -match 'blockdev --setro') 'write boundary never restores read-only mode'
+    Assert-True ($source -match 'post-write readback SHA-256') 'write boundary has no post-write hash check'
+    Assert-True ($source -notmatch 'lk_b|init_boot_b') 'write boundary can target the active B slot'
+}
+
+It 'keeps the preview wizard planning-only even after authorization' {
+    $path = Join-Path $repoRoot 'Start-OPPOPad5Unlock.ps1'
+    Assert-True (Test-Path -LiteralPath $path -PathType Leaf) 'advanced wizard is missing'
+    $source = Get-Content -LiteralPath $path -Raw
+    Assert-True ($source -match 'does not automatically execute destructive commands') 'planning-only evidence boundary is missing'
+    Assert-True ($source -notmatch '(?im)&\s*(?:adb|fastboot)|Invoke-ExternalTool') 'preview wizard directly executes a device tool'
+}
+
 Write-Host ('RESULT passed={0} failed={1}' -f $script:Passed, $script:Failed)
 if ($script:Failed -ne 0) { exit 1 }

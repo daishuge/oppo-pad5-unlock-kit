@@ -526,6 +526,240 @@ function Receive-PinnedAsset {
     return $finalCheck
 }
 
+function Test-DestructivePrerequisites {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]$Profile,
+        [Parameter(Mandatory = $true)]$Audit,
+        [Parameter(Mandatory = $true)]$Assets,
+        [Parameter(Mandatory = $true)]$Stage,
+        [Parameter(Mandatory = $true)][bool]$RootAvailable,
+        [switch]$EnableDestructive,
+        [AllowEmptyString()][string]$ConfirmationPhrase = ''
+    )
+
+    $blockers = @()
+    if (-not $EnableDestructive.IsPresent) {
+        $blockers += 'destructive mode was not explicitly enabled'
+    }
+    if ($ConfirmationPhrase -cne [string]$Profile.workflow.confirmationPhrase) {
+        $blockers += 'exact destructive confirmation phrase is missing'
+    }
+    if ([string]$Audit.ProfileId -cne [string]$Profile.id) {
+        $blockers += 'audit profile does not match the selected compatibility profile'
+    }
+    if (-not [bool]$Audit.ReadyForDestructiveWorkflow) {
+        $blockers += 'read-only audit did not declare the device ready'
+    }
+
+    $snapshot = $Audit.Snapshot
+    if ([string]$snapshot.slot -cne [string]$Profile.workflow.sourceSlot) {
+        $blockers += ('live source slot mismatch: expected={0} actual={1}' -f $Profile.workflow.sourceSlot, $snapshot.slot)
+    }
+    if ([int]$snapshot.batteryPercent -lt [int]$Profile.workflow.minimumBatteryPercent) {
+        $blockers += ('live battery is below threshold: required={0} actual={1}' -f $Profile.workflow.minimumBatteryPercent, $snapshot.batteryPercent)
+    }
+    if ([string]$snapshot.flashLocked -cne [string]$Profile.workflow.preUnlockFlashLocked) {
+        $blockers += ('live flash-lock state mismatch: expected={0} actual={1}' -f $Profile.workflow.preUnlockFlashLocked, $snapshot.flashLocked)
+    }
+    if ([string]$snapshot.verifiedBootState -cne [string]$Profile.workflow.preUnlockVerifiedBootState) {
+        $blockers += ('live verified-boot state mismatch: expected={0} actual={1}' -f $Profile.workflow.preUnlockVerifiedBootState, $snapshot.verifiedBootState)
+    }
+    if (-not $RootAvailable) { $blockers += 'temporary root is not available' }
+
+    foreach ($assetField in @('KernelSuValid', 'GhostLockValid', 'LkValid')) {
+        $property = $Assets.PSObject.Properties[$assetField]
+        if ($null -eq $property -or -not [bool]$property.Value) {
+            $blockers += ('required asset validation failed: {0}' -f $assetField)
+        }
+    }
+
+    if ([string]$Stage.TargetSlot -cne [string]$Profile.workflow.targetSlot) {
+        $blockers += ('staged target slot mismatch: expected={0} actual={1}' -f $Profile.workflow.targetSlot, $Stage.TargetSlot)
+    }
+    if ([int64]$Stage.LkPartitionBytes -ne [int64]$Profile.partitions.lk.partitionBytes) {
+        $blockers += ('LK partition size mismatch: expected={0} actual={1}' -f $Profile.partitions.lk.partitionBytes, $Stage.LkPartitionBytes)
+    }
+    if ([string]$Stage.LkStockPrefixSha256 -cne [string]$Profile.partitions.lk.stockPrefixSha256) {
+        $blockers += 'LK stock-prefix SHA-256 mismatch'
+    }
+    if ([int64]$Stage.InitBootPartitionBytes -ne [int64]$Profile.partitions.initBoot.partitionBytes) {
+        $blockers += ('init_boot partition size mismatch: expected={0} actual={1}' -f $Profile.partitions.initBoot.partitionBytes, $Stage.InitBootPartitionBytes)
+    }
+    if ([string]$Stage.InitBootStockSha256 -cne [string]$Profile.partitions.initBoot.stagedStockSha256) {
+        $blockers += 'init_boot stock SHA-256 mismatch'
+    }
+    if (-not [bool]$Stage.LocalBackupsPresent) {
+        $blockers += 'validated local partition backups are missing'
+    }
+    foreach ($backupField in @('LkBackupSha256', 'InitBootBackupSha256')) {
+        $property = $Stage.PSObject.Properties[$backupField]
+        if ($null -eq $property -or [string]$property.Value -notmatch '^[a-fA-F0-9]{64}$') {
+            $blockers += ('local backup digest is missing or malformed: {0}' -f $backupField)
+        }
+    }
+
+    return [pscustomobject]@{
+        Allowed = ($blockers.Count -eq 0)
+        ProfileId = [string]$Profile.id
+        SourceSlot = [string]$Profile.workflow.sourceSlot
+        TargetSlot = [string]$Profile.workflow.targetSlot
+        Blockers = @($blockers)
+    }
+}
+
+function Get-DestructiveCommandPlan {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]$Profile,
+        [Parameter(Mandatory = $true)]$Gate
+    )
+
+    if (-not [bool]$Gate.Allowed) { return @() }
+    if ([string]$Gate.ProfileId -cne [string]$Profile.id -or
+        [string]$Gate.SourceSlot -cne '_b' -or
+        [string]$Gate.TargetSlot -cne '_a') {
+        throw 'Destructive command planning is restricted to the validated OPD2506 B-to-A profile.'
+    }
+
+    return @(
+        [pscustomobject]@{ Id = 'write-lk-a'; Boundary = 'device-root-shell'; RequiresRevalidation = $true },
+        [pscustomobject]@{ Id = 'set-active-a'; Boundary = 'device-root-shell'; RequiresRevalidation = $true },
+        [pscustomobject]@{ Id = 'unlock-and-revalidate'; Boundary = 'host-fastboot'; RequiresRevalidation = $true },
+        [pscustomobject]@{ Id = 'flash-init-boot-a'; Boundary = 'host-fastboot'; RequiresRevalidation = $true }
+    )
+}
+
+function Test-LkWriteReadback {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]$Profile,
+        [Parameter(Mandatory = $true)]$Readback
+    )
+
+    $valid = (
+        [int64]$Readback.BytesWritten -eq [int64]$Profile.partitions.lk.modifiedBytes -and
+        [string]$Readback.ModifiedSha256 -ceq [string]$Profile.partitions.lk.modifiedSha256 -and
+        [bool]$Readback.BlockDeviceReadOnly
+    )
+    return [pscustomobject]@{ Valid = $valid }
+}
+
+function Test-UnlockReadback {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][bool]$HostCommandSucceeded,
+        [Parameter(Mandatory = $true)][hashtable]$Variables
+    )
+
+    return ($HostCommandSucceeded -and (Test-FastbootUnlocked -Variables $Variables))
+}
+
+function Test-PersistentRootReadback {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]$Profile,
+        [Parameter(Mandatory = $true)]$Snapshot
+    )
+
+    return (
+        [bool]$Snapshot.BootWasOrdinaryReboot -and
+        [string]$Snapshot.Slot -ceq [string]$Profile.workflow.targetSlot -and
+        [string]$Snapshot.FlashLocked -ceq [string]$Profile.workflow.postUnlockFlashLocked -and
+        [string]$Snapshot.VerifiedBootState -ceq [string]$Profile.workflow.postUnlockVerifiedBootState -and
+        [string]$Snapshot.KsudVersion -match '(?:^|\s)3\.2\.5(?:$|\s)' -and
+        [string]$Snapshot.IdOutput -match '(?:^|\s)uid=0\(root\)(?:\s|$)'
+    )
+}
+
+function New-UnlockWorkflowState {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$Serial,
+        [Parameter(Mandatory = $true)]$Profile,
+        [Parameter(Mandatory = $true)]$Audit,
+        [Parameter(Mandatory = $true)]$Assets,
+        [Parameter(Mandatory = $true)]$Stage
+    )
+
+    return [pscustomobject][ordered]@{
+        SchemaVersion = 1
+        EvidenceClass = 'local-unverified-workflow-state'
+        Serial = $Serial
+        ProfileId = [string]$Profile.id
+        SourceSlot = [string]$Profile.workflow.sourceSlot
+        TargetSlot = [string]$Profile.workflow.targetSlot
+        Model = [string]$Audit.Snapshot.model
+        Device = [string]$Audit.Snapshot.device
+        DisplayId = [string]$Audit.Snapshot.displayId
+        OtaVersion = [string]$Audit.Snapshot.otaVersion
+        Kernel = [string]$Audit.Snapshot.kernel
+        LiveSlotAtCreation = [string]$Audit.Snapshot.slot
+        BatteryPercentAtCreation = [int]$Audit.Snapshot.batteryPercent
+        LkStockPrefixSha256 = [string]$Profile.partitions.lk.stockPrefixSha256
+        LkModifiedSha256 = [string]$Profile.partitions.lk.modifiedSha256
+        InitBootStockSha256 = [string]$Profile.partitions.initBoot.stagedStockSha256
+        PatchedInitBootSha256 = [string]$Profile.partitions.initBoot.kernelSu325PatchedSha256
+        LkBackupSha256 = [string]$Stage.LkBackupSha256
+        InitBootBackupSha256 = [string]$Stage.InitBootBackupSha256
+        LkAssetValidated = [bool]$Assets.LkValid
+        KernelSuAssetValidated = [bool]$Assets.KernelSuValid
+        GhostLockAssetValidated = [bool]$Assets.GhostLockValid
+        CompletedStages = @()
+        CreatedUtc = [DateTime]::UtcNow.ToString('o')
+    }
+}
+
+function Test-UnlockWorkflowResume {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]$State,
+        [Parameter(Mandatory = $true)][string]$Serial,
+        [Parameter(Mandatory = $true)]$Profile,
+        [Parameter(Mandatory = $true)]$Audit
+    )
+
+    return (
+        [int]$State.SchemaVersion -eq 1 -and
+        [string]$State.Serial -ceq $Serial -and
+        [string]$State.ProfileId -ceq [string]$Profile.id -and
+        [string]$Audit.ProfileId -ceq [string]$Profile.id -and
+        [string]$State.SourceSlot -ceq [string]$Profile.workflow.sourceSlot -and
+        [string]$State.TargetSlot -ceq [string]$Profile.workflow.targetSlot -and
+        [string]$State.Model -ceq [string]$Audit.Snapshot.model -and
+        [string]$State.Device -ceq [string]$Audit.Snapshot.device -and
+        [string]$State.DisplayId -ceq [string]$Audit.Snapshot.displayId -and
+        [string]$State.OtaVersion -ceq [string]$Audit.Snapshot.otaVersion -and
+        [string]$State.Kernel -ceq [string]$Audit.Snapshot.kernel -and
+        [string]$State.LiveSlotAtCreation -ceq [string]$Audit.Snapshot.slot
+    )
+}
+
+function Write-UnlockWorkflowState {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]$State,
+        [Parameter(Mandatory = $true)][string]$Path
+    )
+
+    $fullPath = [IO.Path]::GetFullPath($Path)
+    $parent = Split-Path -Parent $fullPath
+    if (-not (Test-Path -LiteralPath $parent)) { [void](New-Item -ItemType Directory -Path $parent) }
+    $temporary = $fullPath + '.partial'
+    [IO.File]::WriteAllText($temporary, ($State | ConvertTo-Json -Depth 20), [Text.UTF8Encoding]::new($false))
+    Move-Item -LiteralPath $temporary -Destination $fullPath -Force
+}
+
+function Read-UnlockWorkflowState {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { throw ('Workflow state does not exist: {0}' -f $Path) }
+    $state = Get-Content -LiteralPath $Path -Raw -Encoding UTF8 | ConvertFrom-Json
+    if ([int]$state.SchemaVersion -ne 1) { throw 'Unsupported workflow-state schemaVersion.' }
+    return $state
+}
+
 Export-ModuleMember -Function @(
     'Read-UnlockCompatibilityManifest',
     'ConvertFrom-AdbDevices',
@@ -539,5 +773,14 @@ Export-ModuleMember -Function @(
     'Invoke-ReadOnlyAudit',
     'Get-FileSha256',
     'Test-PinnedAsset',
-    'Receive-PinnedAsset'
+    'Receive-PinnedAsset',
+    'Test-DestructivePrerequisites',
+    'Get-DestructiveCommandPlan',
+    'Test-LkWriteReadback',
+    'Test-UnlockReadback',
+    'Test-PersistentRootReadback',
+    'New-UnlockWorkflowState',
+    'Test-UnlockWorkflowResume',
+    'Write-UnlockWorkflowState',
+    'Read-UnlockWorkflowState'
 )
