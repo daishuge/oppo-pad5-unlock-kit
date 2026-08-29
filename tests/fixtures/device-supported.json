@@ -1,0 +1,13 @@
+{
+  "model": "OPD2506",
+  "device": "OP6542L1",
+  "displayId": "OPD2506_16.0.9.400(CN01)",
+  "otaVersion": "OPD2506_11.A.33_0330_202607091921",
+  "kernel": "6.6.118-android15-8-ge58033dc8ea6-abogki498046332-4k",
+  "slot": "_b",
+  "flashLocked": "1",
+  "verifiedBootState": "green",
+  "batteryPercent": 80,
+  "mobileData": "0",
+  "dataRoaming": "0"
+}

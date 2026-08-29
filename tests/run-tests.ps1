@@ -52,6 +52,58 @@ if (-not (Test-Path -LiteralPath $modulePath -PathType Leaf)) {
 }
 Import-Module -Name $modulePath -Force
 
+function New-FakeReadOnlyRunner {
+    param(
+        [Parameter(Mandatory = $true)]$Snapshot,
+        [string]$DevicesText
+    )
+
+    if ([string]::IsNullOrWhiteSpace($DevicesText)) {
+        $DevicesText = Get-Content -LiteralPath (Join-Path $fixtureRoot 'adb-devices-single.txt') -Raw
+    }
+    $values = @{
+        'ro.product.model' = [string]$Snapshot.model
+        'ro.product.device' = [string]$Snapshot.device
+        'ro.build.display.id' = [string]$Snapshot.displayId
+        'ro.build.version.ota' = [string]$Snapshot.otaVersion
+        'ro.boot.slot_suffix' = [string]$Snapshot.slot
+        'ro.boot.flash.locked' = [string]$Snapshot.flashLocked
+        'ro.boot.verifiedbootstate' = [string]$Snapshot.verifiedBootState
+    }
+    $kernel = [string]$Snapshot.kernel
+    $battery = [int]$Snapshot.batteryPercent
+    $mobileData = [string]$Snapshot.mobileData
+    $dataRoaming = [string]$Snapshot.dataRoaming
+
+    return {
+        param([string]$FilePath, [string[]]$Arguments)
+        $joined = $Arguments -join ' '
+        $output = ''
+        if ($joined -eq 'devices -l') {
+            $output = $DevicesText
+        }
+        elseif ($joined -match ' shell getprop (\S+)$') {
+            $output = [string]$values[$matches[1]]
+        }
+        elseif ($joined -match ' shell uname -r$') {
+            $output = $kernel
+        }
+        elseif ($joined -match ' shell dumpsys battery$') {
+            $output = "AC powered: false`nUSB powered: true`nlevel: $battery`nscale: 100"
+        }
+        elseif ($joined -match ' shell settings get global mobile_data$') {
+            $output = $mobileData
+        }
+        elseif ($joined -match ' shell settings get global data_roaming$') {
+            $output = $dataRoaming
+        }
+        else {
+            return [pscustomobject]@{ ExitCode = 91; Output = ('unexpected mock command: {0}' -f $joined) }
+        }
+        return [pscustomobject]@{ ExitCode = 0; Output = $output }
+    }.GetNewClosure()
+}
+
 It 'loads the checked-in compatibility manifest' {
     $manifest = Read-UnlockCompatibilityManifest -Path $manifestPath
     Assert-Equal $manifest.schemaVersion 1 'schemaVersion mismatch'
@@ -110,6 +162,57 @@ It 'rejects a malformed asset hash in a compatibility manifest' {
     finally {
         if (Test-Path -LiteralPath $tempPath) { Remove-Item -LiteralPath $tempPath -Force }
     }
+}
+
+It 'allows only the enumerated read-only ADB commands' {
+    Assert-True (Test-ReadOnlyAdbArguments -Arguments @('devices', '-l')) 'devices -l was rejected'
+    Assert-True (Test-ReadOnlyAdbArguments -Arguments @('-s', 'TESTSERIAL0001', 'shell', 'getprop', 'ro.product.model')) 'getprop was rejected'
+    Assert-True (Test-ReadOnlyAdbArguments -Arguments @('-s', 'TESTSERIAL0001', 'shell', 'dumpsys', 'battery')) 'battery query was rejected'
+    Assert-True (-not (Test-ReadOnlyAdbArguments -Arguments @('-s', 'TESTSERIAL0001', 'install', 'x.apk'))) 'install was accepted'
+    Assert-True (-not (Test-ReadOnlyAdbArguments -Arguments @('-s', 'TESTSERIAL0001', 'reboot'))) 'reboot was accepted'
+    Assert-True (-not (Test-ReadOnlyAdbArguments -Arguments @('-s', 'TESTSERIAL0001', 'shell', 'su', '-c', 'id'))) 'su was accepted'
+}
+
+It 'audits the exact supported profile through an injected runner' {
+    $snapshot = Get-Content -LiteralPath (Join-Path $fixtureRoot 'device-supported.json') -Raw | ConvertFrom-Json
+    $runner = New-FakeReadOnlyRunner -Snapshot $snapshot
+    $audit = Invoke-ReadOnlyAudit -AdbPath 'fixture-adb.exe' -ManifestPath $manifestPath -CommandRunner $runner
+    Assert-Equal $audit.ProfileId 'opd2506-cn-16.0.9.400-b-to-a' 'audit profile mismatch'
+    Assert-True $audit.ReadyForDestructiveWorkflow 'supported fixture was not marked ready'
+    Assert-Equal $audit.SerialMasked 'TES********001' 'serial masking mismatch'
+}
+
+It 'reports an exact kernel mismatch instead of a generic failure' {
+    $snapshot = Get-Content -LiteralPath (Join-Path $fixtureRoot 'device-wrong-kernel.json') -Raw | ConvertFrom-Json
+    $runner = New-FakeReadOnlyRunner -Snapshot $snapshot
+    Assert-Throws -Action {
+        Invoke-ReadOnlyAudit -AdbPath 'fixture-adb.exe' -ManifestPath $manifestPath -CommandRunner $runner
+    } -Pattern 'kernel: expected=.*actual=.*unknown-build'
+}
+
+It 'does not mark a low-battery device ready for destructive work' {
+    $snapshot = Get-Content -LiteralPath (Join-Path $fixtureRoot 'device-supported.json') -Raw | ConvertFrom-Json
+    $snapshot.batteryPercent = 59
+    $runner = New-FakeReadOnlyRunner -Snapshot $snapshot
+    $audit = Invoke-ReadOnlyAudit -AdbPath 'fixture-adb.exe' -ManifestPath $manifestPath -CommandRunner $runner
+    Assert-True (-not $audit.ReadyForDestructiveWorkflow) 'low battery was accepted'
+    Assert-True (($audit.Blockers -join ' ') -match 'battery') 'low-battery blocker is missing'
+}
+
+It 'reports active slot A as unsupported for the preview destructive path' {
+    $snapshot = Get-Content -LiteralPath (Join-Path $fixtureRoot 'device-supported.json') -Raw | ConvertFrom-Json
+    $snapshot.slot = '_a'
+    $runner = New-FakeReadOnlyRunner -Snapshot $snapshot
+    $audit = Invoke-ReadOnlyAudit -AdbPath 'fixture-adb.exe' -ManifestPath $manifestPath -CommandRunner $runner
+    Assert-True (-not $audit.ReadyForDestructiveWorkflow) 'untested A-to-B path was accepted'
+    Assert-True (($audit.Blockers -join ' ') -match 'source slot') 'slot blocker is missing'
+}
+
+It 'keeps the safe entry point free of mutating operation tokens' {
+    $safeEntry = Join-Path $repoRoot 'Check-OPPOPad5.ps1'
+    Assert-True (Test-Path -LiteralPath $safeEntry -PathType Leaf) 'safe entry point is missing'
+    $source = Get-Content -LiteralPath $safeEntry -Raw
+    Assert-True ($source -notmatch '(?im)\b(?:install|push|reboot|setrw|fastboot|su\s+-c)\b') 'safe entry point contains a mutating operation token'
 }
 
 Write-Host ('RESULT passed={0} failed={1}' -f $script:Passed, $script:Failed)

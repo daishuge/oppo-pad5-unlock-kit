@@ -242,11 +242,178 @@ function Resolve-CompatibilityProfile {
     throw ('Unsupported device identity: {0}' -f ($all -join '; '))
 }
 
+function Test-ReadOnlyAdbArguments {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyCollection()]
+        [string[]]$Arguments
+    )
+
+    if ($Arguments.Count -eq 2 -and $Arguments[0] -eq 'devices' -and $Arguments[1] -eq '-l') {
+        return $true
+    }
+    if ($Arguments.Count -lt 5) { return $false }
+    if ($Arguments[0] -ne '-s' -or $Arguments[2] -ne 'shell') { return $false }
+    if ($Arguments[1] -notmatch '^[A-Za-z0-9._:-]+$') { return $false }
+
+    if ($Arguments.Count -eq 5 -and $Arguments[3] -eq 'getprop' -and $Arguments[4] -in @(
+        'ro.product.model',
+        'ro.product.device',
+        'ro.build.display.id',
+        'ro.build.version.ota',
+        'ro.boot.slot_suffix',
+        'ro.boot.flash.locked',
+        'ro.boot.verifiedbootstate'
+    )) {
+        return $true
+    }
+    if ($Arguments.Count -eq 5 -and $Arguments[3] -eq 'uname' -and $Arguments[4] -eq '-r') {
+        return $true
+    }
+    if ($Arguments.Count -eq 5 -and $Arguments[3] -eq 'dumpsys' -and $Arguments[4] -eq 'battery') {
+        return $true
+    }
+    if (
+        $Arguments.Count -eq 7 -and
+        $Arguments[3] -eq 'settings' -and
+        $Arguments[4] -eq 'get' -and
+        $Arguments[5] -eq 'global' -and
+        $Arguments[6] -in @('mobile_data', 'data_roaming')
+    ) {
+        return $true
+    }
+    return $false
+}
+
+function Invoke-ExternalTool {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$FilePath,
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][string[]]$Arguments
+    )
+
+    if (-not (Test-Path -LiteralPath $FilePath -PathType Leaf) -and $FilePath -notmatch '^[A-Za-z0-9_.-]+$') {
+        throw ('External tool does not exist: {0}' -f $FilePath)
+    }
+
+    $lines = @(& $FilePath @Arguments 2>&1 | ForEach-Object { $_.ToString() })
+    $exitCode = $LASTEXITCODE
+    return [pscustomobject]@{
+        ExitCode = [int]$exitCode
+        Output = ($lines -join "`n")
+    }
+}
+
+function Invoke-ReadOnlyAdb {
+    param(
+        [Parameter(Mandatory = $true)][string]$AdbPath,
+        [Parameter(Mandatory = $true)][string[]]$Arguments,
+        [scriptblock]$CommandRunner
+    )
+
+    if (-not (Test-ReadOnlyAdbArguments -Arguments $Arguments)) {
+        throw ('Read-only ADB policy rejected command arguments: {0}' -f ($Arguments -join ' '))
+    }
+
+    $result = $null
+    if ($null -ne $CommandRunner) {
+        $result = & $CommandRunner $AdbPath $Arguments
+    }
+    else {
+        $result = Invoke-ExternalTool -FilePath $AdbPath -Arguments $Arguments
+    }
+    if ($null -eq $result -or $null -eq $result.PSObject.Properties['ExitCode'] -or $null -eq $result.PSObject.Properties['Output']) {
+        throw 'Command runner returned an invalid result object.'
+    }
+    if ([int]$result.ExitCode -ne 0) {
+        throw ('Read-only ADB command failed with exit code {0}: {1}' -f $result.ExitCode, $result.Output)
+    }
+    return ([string]$result.Output).Trim()
+}
+
+function Protect-DeviceSerial {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][string]$Serial)
+
+    if ($Serial.Length -le 6) { return ('*' * $Serial.Length) }
+    return $Serial.Substring(0, 3) + ('*' * ($Serial.Length - 6)) + $Serial.Substring($Serial.Length - 3, 3)
+}
+
+function Invoke-ReadOnlyAudit {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$AdbPath,
+        [Parameter(Mandatory = $true)][string]$ManifestPath,
+        [string]$Serial,
+        [scriptblock]$CommandRunner
+    )
+
+    $manifest = Read-UnlockCompatibilityManifest -Path $ManifestPath
+    $devicesText = Invoke-ReadOnlyAdb -AdbPath $AdbPath -Arguments @('devices', '-l') -CommandRunner $CommandRunner
+    $selectedSerial = Select-AdbSerial -Devices @(ConvertFrom-AdbDevices -Text $devicesText) -Serial $Serial
+
+    function Read-Property {
+        param([string]$Name)
+        return Invoke-ReadOnlyAdb -AdbPath $AdbPath -Arguments @('-s', $selectedSerial, 'shell', 'getprop', $Name) -CommandRunner $CommandRunner
+    }
+
+    $batteryText = Invoke-ReadOnlyAdb -AdbPath $AdbPath -Arguments @('-s', $selectedSerial, 'shell', 'dumpsys', 'battery') -CommandRunner $CommandRunner
+    if ($batteryText -notmatch '(?m)^\s*level:\s*(\d+)\s*$') {
+        throw 'Could not parse battery level from dumpsys battery.'
+    }
+
+    $snapshot = [pscustomobject]@{
+        model = Read-Property -Name 'ro.product.model'
+        device = Read-Property -Name 'ro.product.device'
+        displayId = Read-Property -Name 'ro.build.display.id'
+        otaVersion = Read-Property -Name 'ro.build.version.ota'
+        kernel = Invoke-ReadOnlyAdb -AdbPath $AdbPath -Arguments @('-s', $selectedSerial, 'shell', 'uname', '-r') -CommandRunner $CommandRunner
+        slot = Read-Property -Name 'ro.boot.slot_suffix'
+        flashLocked = Read-Property -Name 'ro.boot.flash.locked'
+        verifiedBootState = Read-Property -Name 'ro.boot.verifiedbootstate'
+        batteryPercent = [int]$matches[1]
+        mobileData = Invoke-ReadOnlyAdb -AdbPath $AdbPath -Arguments @('-s', $selectedSerial, 'shell', 'settings', 'get', 'global', 'mobile_data') -CommandRunner $CommandRunner
+        dataRoaming = Invoke-ReadOnlyAdb -AdbPath $AdbPath -Arguments @('-s', $selectedSerial, 'shell', 'settings', 'get', 'global', 'data_roaming') -CommandRunner $CommandRunner
+    }
+
+    $profile = Resolve-CompatibilityProfile -Manifest $manifest -Snapshot $snapshot
+    $blockers = @()
+    if ($snapshot.slot -cne [string]$profile.workflow.sourceSlot) {
+        $blockers += ('source slot mismatch: expected={0} actual={1}; the opposite direction is not validated in this preview' -f $profile.workflow.sourceSlot, $snapshot.slot)
+    }
+    if ($snapshot.batteryPercent -lt [int]$profile.workflow.minimumBatteryPercent) {
+        $blockers += ('battery below threshold: required={0} actual={1}' -f $profile.workflow.minimumBatteryPercent, $snapshot.batteryPercent)
+    }
+    if ($snapshot.flashLocked -cne [string]$profile.workflow.preUnlockFlashLocked) {
+        $blockers += ('flash lock pre-state mismatch: expected={0} actual={1}' -f $profile.workflow.preUnlockFlashLocked, $snapshot.flashLocked)
+    }
+    if ($snapshot.verifiedBootState -cne [string]$profile.workflow.preUnlockVerifiedBootState) {
+        $blockers += ('verified boot pre-state mismatch: expected={0} actual={1}' -f $profile.workflow.preUnlockVerifiedBootState, $snapshot.verifiedBootState)
+    }
+    if ($snapshot.mobileData -ne '0') { $blockers += ('mobile data is not disabled: actual={0}' -f $snapshot.mobileData) }
+    if ($snapshot.dataRoaming -ne '0') { $blockers += ('data roaming is not disabled: actual={0}' -f $snapshot.dataRoaming) }
+
+    return [pscustomobject]@{
+        SchemaVersion = 1
+        EvidenceClass = 'read-only-audit'
+        ProfileId = [string]$profile.id
+        SerialMasked = Protect-DeviceSerial -Serial $selectedSerial
+        Snapshot = $snapshot
+        ReadyForDestructiveWorkflow = ($blockers.Count -eq 0)
+        Blockers = @($blockers)
+    }
+}
+
 Export-ModuleMember -Function @(
     'Read-UnlockCompatibilityManifest',
     'ConvertFrom-AdbDevices',
     'Select-AdbSerial',
     'ConvertFrom-FastbootVariables',
     'Test-FastbootUnlocked',
-    'Resolve-CompatibilityProfile'
+    'Resolve-CompatibilityProfile',
+    'Test-ReadOnlyAdbArguments',
+    'Invoke-ExternalTool',
+    'Protect-DeviceSerial',
+    'Invoke-ReadOnlyAudit'
 )
