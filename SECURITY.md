@@ -6,7 +6,7 @@
 
 ## Report a vulnerability
 
-请使用 GitHub Security Advisory 的 private reporting；不要在公开 issue 中上传设备 serial、完整日志、OTA 私有链接、APK、partition dump 或个人数据。
+本仓库当前没有启用 GitHub Private Vulnerability Reporting。可以提交只含脱敏、最小复现信息的公开 issue；如果问题无法安全脱敏，只创建一个不含技术细节的 `security contact request`，由维护者另行提供私密通道。不要在公开 issue 中上传设备 serial、完整日志、OTA 私有链接、APK、partition dump、exploit payload 或个人数据。
 
 报告至少包含：受影响 commit、Windows/PowerShell 版本、预期 gate、实际 gate、最小合成 fixture，以及问题是否可能导致命令注入、错误设备选择、错误 slot 写入、hash 绕过或敏感信息泄露。
 

@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.0-preview.2 - 2026-08-29
+
+- Corrected the security-reporting instructions to match the repository's actual GitHub settings. Private Vulnerability Reporting is not currently enabled; public reports must be redacted, and sensitive reports should first request a private channel without disclosing details.
+
 ## 0.1.0-preview.1 - 2026-08-29
 
 Initial public Preview.
