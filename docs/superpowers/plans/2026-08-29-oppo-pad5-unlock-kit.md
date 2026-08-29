@@ -205,7 +205,7 @@ Commit message: `feat: add separate safe and advanced launchers`
 
 - [ ] **Step 1: Write the evidence boundary above the fold**
 
-State that the original manual OPD2506 `_b` to `_a` path was observed on one device, while the new automation has only mock/CI coverage because the owner declined another destructive run. Do not use “high compatibility”, “brick-proof”, or “guaranteed”.
+State that the original manual OPD2506 `_b` to `_a` path was observed on one device, while the new automation has only mock/CI coverage because the owner declined another destructive run. Do not use unsupported guarantee language.
 
 - [ ] **Step 2: Write the complete Chinese tutorial**
 
@@ -217,7 +217,7 @@ Fastboot-accessible failures can use verified stock partition images. A fully ha
 
 - [ ] **Step 4: Run link, placeholder, secret, binary, and wording scans**
 
-Fail on missing local Markdown targets, `TODO`/`TBD`, device serials, private backup paths, `.img`/`.apk` files in Git, or unsupported guarantee language.
+Fail on missing local Markdown targets, unfinished placeholder markers, device serials, private backup paths, `.img`/`.apk` files in Git, or unsupported guarantee language.
 
 - [ ] **Step 5: Commit**
 
@@ -284,4 +284,4 @@ Record purpose, path, public source, preview status, entry points, and verificat
 
 ## Self-review
 
-The plan covers the dual A+C request, forbids real-device execution during development, separates safe and destructive code paths, distinguishes mock evidence from the prior manual observation, tests both supported Windows shells, and refuses unlicensed binary redistribution. Function names and stage names are consistent across tasks. The plan contains no `TODO`, `TBD`, or unspecified implementation step.
+The plan covers the dual A+C request, forbids real-device execution during development, separates safe and destructive code paths, distinguishes mock evidence from the prior manual observation, tests both supported Windows shells, and refuses unlicensed binary redistribution. Function names and stage names are consistent across tasks. The plan contains no unfinished placeholder marker or unspecified implementation step.
