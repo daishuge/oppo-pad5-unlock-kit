@@ -574,6 +574,12 @@ function Test-DestructivePrerequisites {
         }
     }
 
+    if ([string]$Stage.ProfileId -cne [string]$Profile.id) {
+        $blockers += 'stage report profile does not match the selected compatibility profile'
+    }
+    if ([string]$Stage.EvidenceClass -cne 'device-read-only-stage-audit') {
+        $blockers += 'stage report is not classified as device-read-only-stage-audit evidence'
+    }
     if ([string]$Stage.TargetSlot -cne [string]$Profile.workflow.targetSlot) {
         $blockers += ('staged target slot mismatch: expected={0} actual={1}' -f $Profile.workflow.targetSlot, $Stage.TargetSlot)
     }
@@ -760,6 +766,26 @@ function Read-UnlockWorkflowState {
     return $state
 }
 
+function Get-UnlockExitCode {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateSet('Success', 'UnsupportedIdentity', 'AmbiguousTransport', 'AssetMismatch', 'UserActionRequired', 'DestructiveGateDenied', 'DeviceStateChanged')]
+        [string]$Category
+    )
+
+    $codes = @{
+        Success = 0
+        UnsupportedIdentity = 10
+        AmbiguousTransport = 11
+        AssetMismatch = 12
+        UserActionRequired = 20
+        DestructiveGateDenied = 30
+        DeviceStateChanged = 40
+    }
+    return [int]$codes[$Category]
+}
+
 Export-ModuleMember -Function @(
     'Read-UnlockCompatibilityManifest',
     'ConvertFrom-AdbDevices',
@@ -782,5 +808,6 @@ Export-ModuleMember -Function @(
     'New-UnlockWorkflowState',
     'Test-UnlockWorkflowResume',
     'Write-UnlockWorkflowState',
-    'Read-UnlockWorkflowState'
+    'Read-UnlockWorkflowState',
+    'Get-UnlockExitCode'
 )

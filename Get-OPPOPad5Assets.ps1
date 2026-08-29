@@ -27,7 +27,7 @@ foreach ($assetName in $Download) {
         Sha256 = $result.ActualSha256
         Valid = $result.Valid
     }
-    Write-Host ('已验证：{0}  {1}' -f $assetName, $result.ActualSha256) -ForegroundColor Green
+    Write-Host ('Validated: {0}  {1}' -f $assetName, $result.ActualSha256) -ForegroundColor Green
 }
 
 foreach ($supplied in @(
@@ -37,7 +37,7 @@ foreach ($supplied in @(
     if ([string]::IsNullOrWhiteSpace([string]$supplied.Path)) { continue }
     $result = Test-PinnedAsset -Path $supplied.Path -Asset $manifest.assets.($supplied.Name)
     if (-not $result.Valid) {
-        throw ('用户提供的 {0} 未通过验证：{1}' -f $supplied.Name, $result.Reason)
+        throw ('User-supplied {0} failed validation: {1}' -f $supplied.Name, $result.Reason)
     }
     $results += [pscustomobject]@{
         Name = $supplied.Name
@@ -46,7 +46,7 @@ foreach ($supplied in @(
         Sha256 = $result.ActualSha256
         Valid = $result.Valid
     }
-    Write-Host ('已验证：{0}  {1}' -f $supplied.Name, $result.ActualSha256) -ForegroundColor Green
+    Write-Host ('Validated: {0}  {1}' -f $supplied.Name, $result.ActualSha256) -ForegroundColor Green
 }
 
 if ($PassThru) { return $results }

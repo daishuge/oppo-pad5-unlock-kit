@@ -335,6 +335,8 @@ function New-ReadyDestructiveFixture {
             LkValid = $true
         }
         Stage = [pscustomobject]@{
+            ProfileId = [string]$profile.id
+            EvidenceClass = 'device-read-only-stage-audit'
             TargetSlot = '_a'
             LkPartitionBytes = 16777216
             LkStockPrefixSha256 = '0da00158fbed097d8ced1fb61bb2c3c5048fc3a9086996e65715e31ccbbbaede'
@@ -490,6 +492,51 @@ It 'keeps the preview wizard planning-only even after authorization' {
     $source = Get-Content -LiteralPath $path -Raw
     Assert-True ($source -match 'does not automatically execute destructive commands') 'planning-only evidence boundary is missing'
     Assert-True ($source -notmatch '(?im)&\s*(?:adb|fastboot)|Invoke-ExternalTool') 'preview wizard directly executes a device tool'
+}
+
+It 'maps public failure classes to stable exit codes' {
+    Assert-Equal (Get-UnlockExitCode -Category Success) 0 'success exit code changed'
+    Assert-Equal (Get-UnlockExitCode -Category UnsupportedIdentity) 10 'unsupported exit code changed'
+    Assert-Equal (Get-UnlockExitCode -Category AmbiguousTransport) 11 'transport exit code changed'
+    Assert-Equal (Get-UnlockExitCode -Category AssetMismatch) 12 'asset exit code changed'
+    Assert-Equal (Get-UnlockExitCode -Category UserActionRequired) 20 'user-action exit code changed'
+    Assert-Equal (Get-UnlockExitCode -Category DestructiveGateDenied) 30 'gate exit code changed'
+    Assert-Equal (Get-UnlockExitCode -Category DeviceStateChanged) 40 'state-drift exit code changed'
+}
+
+It 'runs the read-only checker from a Unicode path containing spaces through an injected runner' {
+    $unicodeSuffix = ([string][char]0x4E2D) + ([string][char]0x6587)
+    $tempRoot = Join-Path ([IO.Path]::GetTempPath()) ('OPPO Pad5 {0} {1}' -f $unicodeSuffix, [guid]::NewGuid().ToString('N'))
+    [void](New-Item -ItemType Directory -Path $tempRoot)
+    try {
+        Copy-Item -LiteralPath (Join-Path $repoRoot 'Check-OPPOPad5.ps1') -Destination $tempRoot
+        Copy-Item -LiteralPath (Join-Path $repoRoot 'src') -Destination $tempRoot -Recurse
+        Copy-Item -LiteralPath (Join-Path $repoRoot 'config') -Destination $tempRoot -Recurse
+        $snapshot = Get-Content -LiteralPath (Join-Path $fixtureRoot 'device-supported.json') -Raw | ConvertFrom-Json
+        $runner = New-FakeReadOnlyRunner -Snapshot $snapshot
+        $unicodeFileName = (([string][char]0x8F93) + ([string][char]0x51FA) + ' report.json')
+        $outputPath = Join-Path $tempRoot $unicodeFileName
+        $result = & (Join-Path $tempRoot 'Check-OPPOPad5.ps1') -CommandRunner $runner -OutputJson $outputPath -PassThru
+        Assert-Equal $result.ProfileId 'opd2506-cn-16.0.9.400-b-to-a' 'Unicode-path audit profile mismatch'
+        Assert-True (Test-Path -LiteralPath $outputPath -PathType Leaf) 'Unicode-path JSON report is missing'
+    }
+    finally {
+        if (Test-Path -LiteralPath $tempRoot) { Remove-Item -LiteralPath $tempRoot -Recurse -Force }
+    }
+}
+
+It 'keeps safe and advanced double-click launchers physically separate' {
+    $safePath = Join-Path $repoRoot 'Start-ReadOnlyCheck.cmd'
+    $advancedPath = Join-Path $repoRoot 'Start-UnlockWizard.cmd'
+    Assert-True (Test-Path -LiteralPath $safePath -PathType Leaf) 'safe launcher is missing'
+    Assert-True (Test-Path -LiteralPath $advancedPath -PathType Leaf) 'advanced launcher is missing'
+    $safe = Get-Content -LiteralPath $safePath -Raw
+    $advanced = Get-Content -LiteralPath $advancedPath -Raw
+    Assert-True ($safe -match '%~dp0Check-OPPOPad5\.ps1') 'safe launcher does not anchor to its own directory'
+    Assert-True ($safe -notmatch 'Start-OPPOPad5Unlock|EnableDestructive|ConfirmationPhrase') 'safe launcher references the advanced path'
+    Assert-True ($advanced -match '%~dp0Start-OPPOPad5Unlock\.ps1') 'advanced launcher does not anchor to its own directory'
+    Assert-True ($advanced -notmatch 'EnableDestructive[^%]*I UNDERSTAND') 'advanced launcher embeds destructive authorization'
+    Assert-True (($safe + $advanced) -notmatch '(?im)\bcmd(?:\.exe)?\s+/c\b') 'launcher nests cmd /c'
 }
 
 Write-Host ('RESULT passed={0} failed={1}' -f $script:Passed, $script:Failed)

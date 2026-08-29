@@ -26,27 +26,27 @@ try {
     elseif ($null -eq $CommandRunner) {
         $command = Get-Command adb.exe -ErrorAction SilentlyContinue
         if ($null -eq $command) {
-            throw '找不到 adb.exe。请从 Android Developers 官方页面下载 Platform-Tools，并通过 -PlatformToolsDir 指定目录。'
+            throw 'adb.exe was not found. Download official Android Platform-Tools and pass -PlatformToolsDir.'
         }
         $adbPath = $command.Source
     }
 
     if ($null -eq $CommandRunner -and -not (Test-Path -LiteralPath $adbPath -PathType Leaf)) {
-        throw ('adb.exe 不存在：{0}' -f $adbPath)
+        throw ('adb.exe does not exist: {0}' -f $adbPath)
     }
 
     $audit = Invoke-ReadOnlyAudit -AdbPath $adbPath -ManifestPath $ManifestPath -Serial $Serial -CommandRunner $CommandRunner
 
-    Write-Host ('设备：{0} / {1}' -f $audit.Snapshot.model, $audit.Snapshot.device)
-    Write-Host ('版本：{0}' -f $audit.Snapshot.displayId)
-    Write-Host ('内核：{0}' -f $audit.Snapshot.kernel)
-    Write-Host ('槽位：{0}；电量：{1}%' -f $audit.Snapshot.slot, $audit.Snapshot.batteryPercent)
-    Write-Host ('设备标识：{0}' -f $audit.SerialMasked)
+    Write-Host ('Device: {0} / {1}' -f $audit.Snapshot.model, $audit.Snapshot.device)
+    Write-Host ('Build: {0}' -f $audit.Snapshot.displayId)
+    Write-Host ('Kernel: {0}' -f $audit.Snapshot.kernel)
+    Write-Host ('Slot: {0}; battery: {1}%' -f $audit.Snapshot.slot, $audit.Snapshot.batteryPercent)
+    Write-Host ('Masked device ID: {0}' -f $audit.SerialMasked)
     if ($audit.ReadyForDestructiveWorkflow) {
-        Write-Host '只读检查通过：身份与预览配置完全匹配。' -ForegroundColor Green
+        Write-Host 'PASS: the read-only identity exactly matches the preview profile.' -ForegroundColor Green
     }
     else {
-        Write-Host '只读检查完成，但高级流程被以下条件阻断：' -ForegroundColor Yellow
+        Write-Host 'The read-only check completed, but the advanced workflow is blocked:' -ForegroundColor Yellow
         foreach ($blocker in $audit.Blockers) { Write-Host ('- {0}' -f $blocker) -ForegroundColor Yellow }
     }
 
@@ -57,16 +57,21 @@ try {
             [void](New-Item -ItemType Directory -Path $parent)
         }
         [IO.File]::WriteAllText($absoluteOutput, ($audit | ConvertTo-Json -Depth 10), [Text.UTF8Encoding]::new($false))
-        Write-Host ('报告：{0}' -f $absoluteOutput)
+        Write-Host ('Report: {0}' -f $absoluteOutput)
     }
 
     if ($PassThru) { return $audit }
-    if ($audit.ReadyForDestructiveWorkflow) { exit 0 }
-    exit 20
+    if ($audit.ReadyForDestructiveWorkflow) { exit (Get-UnlockExitCode -Category Success) }
+    exit (Get-UnlockExitCode -Category UserActionRequired)
 }
 catch {
-    Write-Error $_.Exception.Message
+    [Console]::Error.WriteLine(('ERROR: {0}' -f $_.Exception.Message))
     if ($PassThru) { throw }
-    if ($_.Exception.Message -match 'Multiple ADB|ambiguous|authorized/online|No ADB') { exit 11 }
-    exit 10
+    if ($_.Exception.Message -match 'Multiple ADB|ambiguous|authorized/online|No ADB') {
+        exit (Get-UnlockExitCode -Category AmbiguousTransport)
+    }
+    if ($_.Exception.Message -match 'Unsupported device identity') {
+        exit (Get-UnlockExitCode -Category UnsupportedIdentity)
+    }
+    exit (Get-UnlockExitCode -Category UserActionRequired)
 }
