@@ -1,0 +1,20 @@
+# User-supplied or downloaded payloads
+assets/
+*.apk
+*.img
+*.zip
+*.bin
+*.elf
+*.partial
+
+# Device-derived evidence and backups
+reports/
+state/
+backups/
+*.log
+
+# Common editor and OS files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

@@ -539,5 +539,45 @@ It 'keeps safe and advanced double-click launchers physically separate' {
     Assert-True (($safe + $advanced) -notmatch '(?im)\bcmd(?:\.exe)?\s+/c\b') 'launcher nests cmd /c'
 }
 
+It 'defines dual-shell Windows CI and Linux shell analysis' {
+    $workflowPath = Join-Path $repoRoot '.github\workflows\test.yml'
+    Assert-True (Test-Path -LiteralPath $workflowPath -PathType Leaf) 'CI workflow is missing'
+    $workflow = Get-Content -LiteralPath $workflowPath -Raw
+    Assert-True ($workflow -match 'windows-latest') 'Windows CI runner is missing'
+    Assert-True ($workflow -match 'powershell') 'Windows PowerShell 5.1 CI is missing'
+    Assert-True ($workflow -match 'pwsh') 'PowerShell 7 CI is missing'
+    Assert-True ($workflow -match 'shellcheck') 'ShellCheck CI is missing'
+    Assert-True ($workflow -match 'bash -n') 'bash syntax CI is missing'
+}
+
+It 'pins Android shell scripts to LF checkouts' {
+    $attributesPath = Join-Path $repoRoot '.gitattributes'
+    Assert-True (Test-Path -LiteralPath $attributesPath -PathType Leaf) '.gitattributes is missing'
+    $attributes = Get-Content -LiteralPath $attributesPath -Raw
+    Assert-True ($attributes -match '(?m)^\*\.sh\s+text\s+eol=lf\s*$') 'shell-script LF policy is missing'
+}
+
+It 'contains no publish-forbidden payloads, private paths, or unfinished markers' {
+    $files = @(& git -C $repoRoot ls-files --cached --others --exclude-standard)
+    $payloads = @($files | Where-Object { [IO.Path]::GetExtension($_).ToLowerInvariant() -in @('.apk', '.img', '.zip', '.bin', '.elf') })
+    Assert-Equal $payloads.Count 0 ('forbidden payload files: {0}' -f ($payloads -join ', '))
+
+    $privateWindowsRoot = ([string][char]0x44) + ':' + [char]0x5C + 'codex' + [char]0x5C + 'project' + [char]0x5C + 'oppo-pad5'
+    $privateLinuxRoot = '/' + 'home' + '/' + 'daishuge' + '/' + 'backups'
+    $unfinishedA = ([string][char]0x54) + [char]0x4F + [char]0x44 + [char]0x4F
+    $unfinishedB = ([string][char]0x54) + [char]0x42 + [char]0x44
+    $patterns = @([regex]::Escape($privateWindowsRoot), [regex]::Escape($privateLinuxRoot), ('\b{0}\b' -f $unfinishedA), ('\b{0}\b' -f $unfinishedB))
+    foreach ($relative in $files) {
+        $path = Join-Path $repoRoot $relative
+        if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { continue }
+        $extension = [IO.Path]::GetExtension($relative).ToLowerInvariant()
+        if ($extension -notin @('.ps1', '.psm1', '.cmd', '.sh', '.json', '.md', '.yml', '.yaml', '.txt') -and [IO.Path]::GetFileName($relative) -notin @('LICENSE', '.gitignore', '.gitattributes')) { continue }
+        $source = Get-Content -LiteralPath $path -Raw
+        foreach ($pattern in $patterns) {
+            Assert-True ($source -notmatch $pattern) ('repository hygiene pattern found in {0}' -f $relative)
+        }
+    }
+}
+
 Write-Host ('RESULT passed={0} failed={1}' -f $script:Passed, $script:Failed)
 if ($script:Failed -ne 0) { exit 1 }
