@@ -1,0 +1,3 @@
+List of devices attached
+TESTSERIAL0001        device product:OP6542L1 model:OPD2506 device:OP6542L1 transport_id:3
+

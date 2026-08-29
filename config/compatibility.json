@@ -1,0 +1,78 @@
+{
+  "schemaVersion": 1,
+  "releaseChannel": "preview",
+  "profiles": [
+    {
+      "id": "opd2506-cn-16.0.9.400-b-to-a",
+      "evidence": "manual-single-device",
+      "identity": {
+        "model": "OPD2506",
+        "device": "OP6542L1",
+        "displayId": "OPD2506_16.0.9.400(CN01)",
+        "otaVersion": "OPD2506_11.A.33_0330_202607091921",
+        "kernel": "6.6.118-android15-8-ge58033dc8ea6-abogki498046332-4k"
+      },
+      "workflow": {
+        "sourceSlot": "_b",
+        "targetSlot": "_a",
+        "minimumBatteryPercent": 60,
+        "preUnlockFlashLocked": "1",
+        "preUnlockVerifiedBootState": "green",
+        "postUnlockFlashLocked": "0",
+        "postUnlockVerifiedBootState": "orange",
+        "confirmationPhrase": "I UNDERSTAND OPD2506 DATA WILL BE ERASED"
+      },
+      "partitions": {
+        "lk": {
+          "partitionBytes": 16777216,
+          "stockPrefixBytes": 9416704,
+          "stockPrefixSha256": "0da00158fbed097d8ced1fb61bb2c3c5048fc3a9086996e65715e31ccbbbaede",
+          "modifiedBytes": 9416784,
+          "modifiedSha256": "eef2ed953a97e4f895b54cb8f06ac8d33e37e6376cedf263f4824e25aa4cb654"
+        },
+        "initBoot": {
+          "partitionBytes": 8388608,
+          "stagedStockSha256": "745e8f8f9804d90d362286b9078b90850e0f5c0877ae641d71924729b77a6e28",
+          "kernelSu325PatchedSha256": "dbe1aae03b81804e7293ca0a9dd86e2808613bd3eda7e33d49e8f9920aface29"
+        }
+      }
+    }
+  ],
+  "assets": {
+    "kernelSu": {
+      "version": "3.2.5",
+      "fileName": "KernelSU_v3.2.5_32525-release.apk",
+      "bytes": 9083665,
+      "sha256": "1417081413bf7ab1de8e440ecbcb62685037c8f28f048f0f8b79e305b31ab916",
+      "url": "https://github.com/tiann/KernelSU/releases/download/v3.2.5/KernelSU_v3.2.5_32525-release.apk",
+      "license": "GPL-3.0-or-later"
+    },
+    "ghostLock": {
+      "version": "e9e10f276c1d41596ec559e9359a930ef3e72302",
+      "fileName": "GhostLock-e9e10f2-release.apk",
+      "bytes": 1921660,
+      "sha256": "85282660f98545d0a9d99dff2aeeffa2a978f5681fc43bd2ae93805770ab03c6",
+      "sourceUrl": "https://github.com/YuKongA/ghostlock-app/tree/e9e10f276c1d41596ec559e9359a930ef3e72302",
+      "userSupplied": true,
+      "license": "Apache-2.0"
+    },
+    "lk": {
+      "version": "e13b657dfaa925df38fbe73802e7e928aa00aa7e",
+      "fileName": "lk.img",
+      "bytes": 9416784,
+      "sha256": "eef2ed953a97e4f895b54cb8f06ac8d33e37e6376cedf263f4824e25aa4cb654",
+      "url": "https://raw.githubusercontent.com/ZincGluxx/OPPO-Pad-5-Unlock/e13b657dfaa925df38fbe73802e7e928aa00aa7e/lk.img",
+      "redistribute": false,
+      "license": "NOASSERTION"
+    },
+    "ota": {
+      "version": "OPD2506_16.0.9.400(CN01)",
+      "fileName": "OPD2506_16.0.9.400_full_official.zip",
+      "bytes": 9489857569,
+      "md5": "d91129ab34b195ac12f70baac3525e01",
+      "sha256": "c3030e151abc6dc59e1dd06ddef7d62fa05298413f0361d7c54d8bc16a59bdea",
+      "userSuppliedRecommended": true,
+      "source": "OPPO official OTA service"
+    }
+  }
+}
