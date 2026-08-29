@@ -483,6 +483,7 @@ It 'forces the LK write boundary back to read-only and verifies readback' {
     Assert-True ($source -match 'trap cleanup EXIT INT TERM HUP') 'write boundary has no cleanup trap'
     Assert-True ($source -match 'blockdev --setro') 'write boundary never restores read-only mode'
     Assert-True ($source -match 'post-write readback SHA-256') 'write boundary has no post-write hash check'
+    Assert-True ($source -match 'I UNDERSTAND OPD2506 DATA WILL BE ERASED') 'write boundary has no independent confirmation phrase'
     Assert-True ($source -notmatch 'lk_b|init_boot_b') 'write boundary can target the active B slot'
 }
 

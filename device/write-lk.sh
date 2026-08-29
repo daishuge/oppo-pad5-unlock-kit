@@ -19,6 +19,7 @@ LK_STOCK_PREFIX_BYTES='9416704'
 LK_STOCK_PREFIX_SHA256='0da00158fbed097d8ced1fb61bb2c3c5048fc3a9086996e65715e31ccbbbaede'
 LK_IMAGE_BYTES='9416784'
 LK_IMAGE_SHA256='eef2ed953a97e4f895b54cb8f06ac8d33e37e6376cedf263f4824e25aa4cb654'
+CONFIRMATION_PHRASE='I UNDERSTAND OPD2506 DATA WILL BE ERASED'
 
 fail() {
     printf 'ERROR: %s\n' "$1" >&2
@@ -32,8 +33,9 @@ require_equal() {
     [ "$actual" = "$expected" ] || fail "$label mismatch"
 }
 
-[ "$#" -eq 1 ] || fail 'usage: write-lk.sh /absolute/path/to/lk.img'
+[ "$#" -eq 2 ] || fail 'usage: write-lk.sh /absolute/path/to/lk.img "confirmation phrase"'
 LK_IMAGE="$1"
+[ "$2" = "$CONFIRMATION_PHRASE" ] || fail 'exact destructive confirmation phrase is missing'
 case "$LK_IMAGE" in
     /*) ;;
     *) fail 'LK image path must be absolute' ;;
@@ -74,7 +76,7 @@ cleanup() {
 trap cleanup EXIT INT TERM HUP
 
 blockdev --setrw "$LK_DEVICE"
-dd if="$LK_IMAGE" of="$LK_DEVICE" bs=1048576 conv=fsync
+dd if="$LK_IMAGE" of="$LK_DEVICE" bs=1048576
 sync
 
 readback_hash="$(head -c "$LK_IMAGE_BYTES" "$LK_DEVICE" | sha256sum | awk '{print $1}')"

@@ -115,7 +115,7 @@ Pull 到电脑后再次计算 `Get-FileHash -Algorithm SHA256`，device 与 host
 $adb = "C:\platform-tools\adb.exe"
 & $adb push ".\assets\lk.img" "/data/local/tmp/oppo-pad5/lk.img"
 & $adb push ".\device\write-lk.sh" "/data/local/tmp/oppo-pad5/write-lk.sh"
-& $adb shell su -c "sh /data/local/tmp/oppo-pad5/write-lk.sh /data/local/tmp/oppo-pad5/lk.img"
+& $adb shell su -c 'sh /data/local/tmp/oppo-pad5/write-lk.sh /data/local/tmp/oppo-pad5/lk.img "I UNDERSTAND OPD2506 DATA WILL BE ERASED"'
 ```
 
 这一步会真实写 `lk_a`，有变砖风险。脚本绝不切 slot；只有它输出的 post-write SHA-256 和 read-only 状态都正确，才有资格研究下一阶段。中断、错误或没有 JSON 成功结果都按失败处理。
