@@ -215,5 +215,98 @@ It 'keeps the safe entry point free of mutating operation tokens' {
     Assert-True ($source -notmatch '(?im)\b(?:install|push|reboot|setrw|fastboot|su\s+-c)\b') 'safe entry point contains a mutating operation token'
 }
 
+It 'accepts an asset only when both byte length and SHA-256 match' {
+    $tempDir = Join-Path ([IO.Path]::GetTempPath()) ('opd2506-asset-{0}' -f [guid]::NewGuid().ToString('N'))
+    [void](New-Item -ItemType Directory -Path $tempDir)
+    try {
+        $path = Join-Path $tempDir 'hello.bin'
+        [IO.File]::WriteAllBytes($path, [Text.Encoding]::ASCII.GetBytes('hello'))
+        $spec = [pscustomobject]@{ fileName = 'hello.bin'; bytes = 5; sha256 = '2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824' }
+        $check = Test-PinnedAsset -Path $path -Asset $spec
+        Assert-True $check.Valid 'correct asset was rejected'
+    }
+    finally {
+        if (Test-Path -LiteralPath $tempDir) { Remove-Item -LiteralPath $tempDir -Recurse -Force }
+    }
+}
+
+It 'rejects same-size wrong content and truncated assets' {
+    $tempDir = Join-Path ([IO.Path]::GetTempPath()) ('opd2506-asset-{0}' -f [guid]::NewGuid().ToString('N'))
+    [void](New-Item -ItemType Directory -Path $tempDir)
+    try {
+        $spec = [pscustomobject]@{ fileName = 'hello.bin'; bytes = 5; sha256 = '2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824' }
+        $wrong = Join-Path $tempDir 'wrong.bin'
+        $short = Join-Path $tempDir 'short.bin'
+        [IO.File]::WriteAllBytes($wrong, [Text.Encoding]::ASCII.GetBytes('HELLO'))
+        [IO.File]::WriteAllBytes($short, [Text.Encoding]::ASCII.GetBytes('hell'))
+        Assert-True (-not (Test-PinnedAsset -Path $wrong -Asset $spec).Valid) 'same-size wrong content was accepted'
+        Assert-True (-not (Test-PinnedAsset -Path $short -Asset $spec).Valid) 'truncated content was accepted'
+    }
+    finally {
+        if (Test-Path -LiteralPath $tempDir) { Remove-Item -LiteralPath $tempDir -Recurse -Force }
+    }
+}
+
+It 'publishes a downloaded asset only after atomic validation' {
+    $tempDir = Join-Path ([IO.Path]::GetTempPath()) ('opd2506-download-{0}' -f [guid]::NewGuid().ToString('N'))
+    [void](New-Item -ItemType Directory -Path $tempDir)
+    try {
+        $spec = [pscustomobject]@{
+            fileName = 'hello.bin'
+            bytes = 5
+            sha256 = '2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824'
+            url = 'https://example.invalid/hello.bin'
+        }
+        $downloader = {
+            param([string]$Url, [string]$Destination)
+            [IO.File]::WriteAllBytes($Destination, [Text.Encoding]::ASCII.GetBytes('hello'))
+        }
+        $result = Receive-PinnedAsset -Asset $spec -DestinationDirectory $tempDir -Downloader $downloader
+        Assert-True (Test-Path -LiteralPath $result.Path -PathType Leaf) 'validated final asset is missing'
+        Assert-True (-not (Test-Path -LiteralPath ($result.Path + '.partial'))) 'partial file survived atomic promotion'
+        Assert-True $result.Valid 'download result was not valid'
+    }
+    finally {
+        if (Test-Path -LiteralPath $tempDir) { Remove-Item -LiteralPath $tempDir -Recurse -Force }
+    }
+}
+
+It 'does not promote a downloader result with the wrong digest' {
+    $tempDir = Join-Path ([IO.Path]::GetTempPath()) ('opd2506-download-{0}' -f [guid]::NewGuid().ToString('N'))
+    [void](New-Item -ItemType Directory -Path $tempDir)
+    try {
+        $spec = [pscustomobject]@{
+            fileName = 'hello.bin'
+            bytes = 5
+            sha256 = '2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824'
+            url = 'https://example.invalid/hello.bin'
+        }
+        $downloader = {
+            param([string]$Url, [string]$Destination)
+            [IO.File]::WriteAllBytes($Destination, [Text.Encoding]::ASCII.GetBytes('HELLO'))
+        }
+        Assert-Throws -Action {
+            Receive-PinnedAsset -Asset $spec -DestinationDirectory $tempDir -Downloader $downloader
+        } -Pattern 'SHA-256|digest|validation'
+        Assert-True (-not (Test-Path -LiteralPath (Join-Path $tempDir 'hello.bin'))) 'invalid download was promoted'
+    }
+    finally {
+        if (Test-Path -LiteralPath $tempDir) { Remove-Item -LiteralPath $tempDir -Recurse -Force }
+    }
+}
+
+It 'rejects a manifest whose pinned LK source leaves the recorded commit' {
+    $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+    $manifest.assets.lk.url = 'https://evil.example/lk.img'
+    $tempPath = Join-Path ([IO.Path]::GetTempPath()) ('opd2506-url-{0}.json' -f [guid]::NewGuid().ToString('N'))
+    try {
+        [IO.File]::WriteAllText($tempPath, ($manifest | ConvertTo-Json -Depth 20), [Text.UTF8Encoding]::new($false))
+        Assert-Throws -Action { Read-UnlockCompatibilityManifest -Path $tempPath } -Pattern 'pinned|URL|source'
+    }
+    finally {
+        if (Test-Path -LiteralPath $tempPath) { Remove-Item -LiteralPath $tempPath -Force }
+    }
+}
+
 Write-Host ('RESULT passed={0} failed={1}' -f $script:Passed, $script:Failed)
 if ($script:Failed -ne 0) { exit 1 }

@@ -102,6 +102,19 @@ function Read-UnlockCompatibilityManifest {
         Assert-HexDigest -Value ([string]$assets.ota.md5) -Kind md5 -FieldName 'assets.ota.md5'
     }
 
+    $expectedKernelSuUrl = 'https://github.com/tiann/KernelSU/releases/download/v{0}/{1}' -f $assets.kernelSu.version, $assets.kernelSu.fileName
+    if ([string]$assets.kernelSu.url -cne $expectedKernelSuUrl) {
+        throw ('KernelSU pinned URL does not match its recorded release and file name: {0}' -f $assets.kernelSu.url)
+    }
+    $expectedLkUrl = 'https://raw.githubusercontent.com/ZincGluxx/OPPO-Pad-5-Unlock/{0}/{1}' -f $assets.lk.version, $assets.lk.fileName
+    if ([string]$assets.lk.url -cne $expectedLkUrl) {
+        throw ('LK pinned source URL does not match its recorded commit and file name: {0}' -f $assets.lk.url)
+    }
+    $expectedGhostLockSource = 'https://github.com/YuKongA/ghostlock-app/tree/{0}' -f $assets.ghostLock.version
+    if ([string]$assets.ghostLock.sourceUrl -cne $expectedGhostLockSource) {
+        throw ('GhostLock pinned source URL does not match its recorded commit: {0}' -f $assets.ghostLock.sourceUrl)
+    }
+
     return $manifest
 }
 
@@ -405,6 +418,114 @@ function Invoke-ReadOnlyAudit {
     }
 }
 
+function Get-FileSha256 {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        throw ('File does not exist: {0}' -f $Path)
+    }
+    return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
+}
+
+function Test-PinnedAsset {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)]$Asset
+    )
+
+    $expectedBytes = [int64](Get-RequiredProperty -Object $Asset -Name 'bytes' -Context 'asset')
+    $expectedSha256 = [string](Get-RequiredProperty -Object $Asset -Name 'sha256' -Context 'asset')
+    Assert-HexDigest -Value $expectedSha256 -Kind sha256 -FieldName 'asset.sha256'
+
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        return [pscustomobject]@{
+            Valid = $false
+            Path = $Path
+            ExpectedBytes = $expectedBytes
+            ActualBytes = $null
+            ExpectedSha256 = $expectedSha256.ToLowerInvariant()
+            ActualSha256 = $null
+            Reason = 'missing'
+        }
+    }
+
+    $item = Get-Item -LiteralPath $Path
+    $actualBytes = [int64]$item.Length
+    $actualSha256 = Get-FileSha256 -Path $Path
+    $valid = ($actualBytes -eq $expectedBytes -and $actualSha256 -ceq $expectedSha256.ToLowerInvariant())
+    $reason = 'ok'
+    if ($actualBytes -ne $expectedBytes) { $reason = 'byte-length-mismatch' }
+    elseif ($actualSha256 -cne $expectedSha256.ToLowerInvariant()) { $reason = 'sha256-mismatch' }
+
+    return [pscustomobject]@{
+        Valid = $valid
+        Path = $item.FullName
+        ExpectedBytes = $expectedBytes
+        ActualBytes = $actualBytes
+        ExpectedSha256 = $expectedSha256.ToLowerInvariant()
+        ActualSha256 = $actualSha256
+        Reason = $reason
+    }
+}
+
+function Receive-PinnedAsset {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]$Asset,
+        [Parameter(Mandatory = $true)][string]$DestinationDirectory,
+        [scriptblock]$Downloader
+    )
+
+    $fileName = [string](Get-RequiredProperty -Object $Asset -Name 'fileName' -Context 'asset')
+    if ([string]::IsNullOrWhiteSpace($fileName) -or $fileName -ne [IO.Path]::GetFileName($fileName)) {
+        throw ('Unsafe asset file name: {0}' -f $fileName)
+    }
+    $urlProperty = $Asset.PSObject.Properties['url']
+    if ($null -eq $urlProperty -or [string]::IsNullOrWhiteSpace([string]$urlProperty.Value)) {
+        throw ('Asset {0} has no downloadable URL and must be supplied by the user.' -f $fileName)
+    }
+    $url = [string]$urlProperty.Value
+    if ($url -notmatch '^https://') { throw ('Asset URL must use HTTPS: {0}' -f $url) }
+
+    $destinationRoot = [IO.Path]::GetFullPath($DestinationDirectory)
+    if (-not (Test-Path -LiteralPath $destinationRoot)) {
+        [void](New-Item -ItemType Directory -Path $destinationRoot)
+    }
+    $finalPath = Join-Path $destinationRoot $fileName
+    $partialPath = $finalPath + '.partial'
+
+    if (Test-Path -LiteralPath $finalPath -PathType Leaf) {
+        $existing = Test-PinnedAsset -Path $finalPath -Asset $Asset
+        if ($existing.Valid) { return $existing }
+        throw ('Existing asset failed validation and will not be overwritten: {0} ({1})' -f $finalPath, $existing.Reason)
+    }
+    if (Test-Path -LiteralPath $partialPath) {
+        Remove-Item -LiteralPath $partialPath -Force
+    }
+
+    if ($null -ne $Downloader) {
+        & $Downloader $url $partialPath
+    }
+    else {
+        Invoke-WebRequest -Uri $url -OutFile $partialPath -UseBasicParsing
+    }
+
+    $check = Test-PinnedAsset -Path $partialPath -Asset $Asset
+    if (-not $check.Valid) {
+        if (Test-Path -LiteralPath $partialPath) { Remove-Item -LiteralPath $partialPath -Force }
+        throw ('Downloaded asset failed byte length/SHA-256 validation: {0} ({1})' -f $fileName, $check.Reason)
+    }
+
+    Move-Item -LiteralPath $partialPath -Destination $finalPath
+    $finalCheck = Test-PinnedAsset -Path $finalPath -Asset $Asset
+    if (-not $finalCheck.Valid) {
+        throw ('Asset failed validation after atomic promotion: {0}' -f $finalPath)
+    }
+    return $finalCheck
+}
+
 Export-ModuleMember -Function @(
     'Read-UnlockCompatibilityManifest',
     'ConvertFrom-AdbDevices',
@@ -415,5 +536,8 @@ Export-ModuleMember -Function @(
     'Test-ReadOnlyAdbArguments',
     'Invoke-ExternalTool',
     'Protect-DeviceSerial',
-    'Invoke-ReadOnlyAudit'
+    'Invoke-ReadOnlyAudit',
+    'Get-FileSha256',
+    'Test-PinnedAsset',
+    'Receive-PinnedAsset'
 )
