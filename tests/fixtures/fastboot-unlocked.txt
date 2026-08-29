@@ -2,4 +2,3 @@
 (bootloader) unlocked: yes
 (bootloader) secure: no
 Finished. Total time: 0.012s
-

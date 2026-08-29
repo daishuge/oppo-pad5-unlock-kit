@@ -3,4 +3,3 @@ Finished. Total time: 0.003s
 (bootloader) current-slot: a
 (bootloader) unlocked: no
 (bootloader) secure: yes
-
