@@ -1,5 +1,7 @@
 # OPPO Pad 5 Unlock Kit
 
+[![test](https://github.com/daishuge/oppo-pad5-unlock-kit/actions/workflows/test.yml/badge.svg)](https://github.com/daishuge/oppo-pad5-unlock-kit/actions/workflows/test.yml)
+
 面向 OPPO Pad 5 `OPD2506` 的安全优先解锁与持久化 root 工具集。
 
 > [!CAUTION]
